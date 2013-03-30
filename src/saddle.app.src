@@ -1,0 +1,11 @@
+{application, saddle, [
+  {description, "OAuth2 handlers for Cowboy web server"},
+  {vsn, "0.0.1"},
+  {registered, []},
+  {applications, [
+    kernel,
+    stdlib,
+    cowboy
+  ]},
+  {env, []}
+]}.
