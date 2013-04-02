@@ -89,6 +89,9 @@ get_redirection_uri(Req, State) ->
       check_redirection_uri(Req2, State#state{redirect_uri = RedirectUri})
   end.
 
+%%
+%% @todo make client_id a token containing redirect_uri!
+%%
 check_redirection_uri(Req, State = #state{
     client_id = ClientId, redirect_uri = RedirectUri, backend = Backend}) ->
   {Opaque, Req2} = cowboy_req:qs_val(<<"state">>, Req, <<>>),
