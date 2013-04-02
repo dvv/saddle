@@ -157,7 +157,8 @@ authorization_decision(Req, State = #state{response_type = <<"code">>,
   }) ->
   % respond with form containing authorization code.
   % NB: flow continues after form submit ok
-  Code = encode({Opaque, ClientId, RedirectUri, Scope}, key(code_secret, Opts)),
+  Code = encode({Opaque, ClientId, RedirectUri, Scope},
+      key(code_secret, Opts), key(code_ttl, Opts)),
   {<<
       "<p>Client: \"", ClientId/binary, "\" asks permission for scope:\"", Scope/binary, "\"</p>",
       "<form action=\"", RedirectUri/binary, "\" method=\"get\">",
@@ -383,7 +384,7 @@ issue_token(Req, State, Context, Scope, Opts) ->
   {halt, Req2, State}.
 
 token(Data, Scope, Opts) ->
-  AccessToken = encode(Data, key(token_secret, Opts)),
+  AccessToken = encode(Data, key(token_secret, Opts), key(token_ttl, Opts)),
   [
       {access_token, AccessToken},
       {token_type, <<"Bearer">>},
@@ -392,8 +393,9 @@ token(Data, Scope, Opts) ->
     ].
 
 token(Data, Scope, Opts, with_refresh) ->
-  AccessToken = encode(Data, key(token_secret, Opts)),
-  RefreshToken = encode(Data, key(refresh_secret, Opts)),
+  AccessToken = encode(Data, key(token_secret, Opts), key(token_ttl, Opts)),
+  RefreshToken = encode(Data, key(refresh_secret, Opts),
+      key(refresh_ttl, Opts)),
   [
       {access_token, AccessToken},
       {token_type, <<"Bearer">>},
@@ -402,8 +404,8 @@ token(Data, Scope, Opts, with_refresh) ->
       {refresh_token, RefreshToken}
     ].
 
-encode(Data, Secret) ->
-  termit:encode_base64(Data, Secret).
+encode(Data, Secret, TTL) ->
+  termit:encode_base64(Data, Secret, TTL).
 
 decode(Data, Secret, TTL) ->
   termit:decode_base64(Data, Secret, TTL).
