@@ -32,3 +32,43 @@
   {error, redirect_uri} |
   {error, scope} |
   {error, mismatch}.
+
+%%
+%% Register a new client.
+%%
+-callback register_client(
+    Name :: binary(),
+    RedirectUri :: binary(),
+    Scope :: binary(),
+    Options :: term()) ->
+  {ok, ClientId :: binary()} |
+  {error, badarg} |
+  {error, scope}.
+
+%%
+%% Get info on given client.
+%%
+-callback validate_client(
+    ClientId :: binary(),
+    Secret :: binary()) ->
+  {ok, RedirectUri :: binary(), Scope :: binary()} |
+  {error, badarg}.
+
+%%
+%% Generate token.
+%%
+-callback register_token(
+    Data :: term(),
+    Options :: term()) ->
+  Token :: binary().
+
+%%
+%% Validate token and retrieve info.
+%% NB: this may possibly involve token revocation if token is one-time one.
+%%
+-callback validate_token(
+    Token :: binary(),
+    Options :: term()) ->
+  {ok, Data :: term()} |
+  {error, forged} |
+  {error, expired}.

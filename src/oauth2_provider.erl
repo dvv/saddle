@@ -89,17 +89,14 @@ get_redirection_uri(Req, State) ->
       check_redirection_uri(Req2, State#state{redirect_uri = RedirectUri})
   end.
 
-%%
-%% @todo make client_id a token containing redirect_uri!
-%%
-check_redirection_uri(Req, State = #state{
-    client_id = ClientId, redirect_uri = RedirectUri, backend = Backend}) ->
+check_redirection_uri(Req, State = #state{client_id = ClientId,
+    redirect_uri = RedirectUri, backend = Backend}) ->
   {Opaque, Req2} = cowboy_req:qs_val(<<"state">>, Req, <<>>),
   case Backend:authorize_client_credentials(
       ClientId, RedirectUri, any, any)
   of
     {ok, _, _} ->
-      check_response_type(Req2, State#state{client_id = ClientId,
+      check_response_type(Req2, State#state{
           opaque = Opaque});
     {error, redirect_uri} ->
       fail(Req2, State#state{data = <<"unauthorized_client">>,
@@ -153,12 +150,12 @@ check_scope(Req, State = #state{
 authorization_decision(Req, State = #state{response_type = <<"code">>,
     client_id = ClientId, redirect_uri = RedirectUri,
     scope = Scope, opaque = Opaque,
-    options = Opts
+    backend = Backend, options = Opts
   }) ->
   % respond with form containing authorization code.
   % NB: flow continues after form submit ok
-  Code = encode({Opaque, ClientId, RedirectUri, Scope},
-      key(code_secret, Opts), key(code_ttl, Opts)),
+  Code = Backend:register_token({code, Opaque, ClientId, RedirectUri, Scope},
+      {key(code_secret, Opts), key(code_ttl, Opts)}),
   {<<
       "<p>Client: \"", ClientId/binary, "\" asks permission for scope:\"", Scope/binary, "\"</p>",
       "<form action=\"", RedirectUri/binary, "\" method=\"get\">",
@@ -184,7 +181,7 @@ authorization_decision(Req, State = #state{response_type = <<"token">>,
   of
     {ok, Identity, Scope2} ->
       % respond with form containing token
-      Token = token({Identity, Scope2}, Scope2, Opts),
+      Token = token(Identity, Scope2, Opts),
       TokenBin = urlencode(Token),
       {<<
           "<p>Client: \"", ClientId/binary, "\" asks permission for scope:\"", Scope2/binary, "\"</p>",
@@ -294,12 +291,8 @@ authorization_code_flow_stage2(Req, State = #state{
   RedirectUri = key(<<"redirect_uri">>, Data),
   % decode token and ensure its validity
   % NB: code is expired after code_ttl seconds since issued
-  case decode(
-      key(<<"code">>, Data),
-      key(code_secret, Opts),
-      key(code_ttl, Opts))
-  of
-    {ok, {_, ClientId, RedirectUri, Scope}} ->
+  case Backend:validate_token(key(<<"code">>, Data), key(code_secret, Opts)) of
+    {ok, {code, _, ClientId, RedirectUri, Scope}} ->
       % authorize client and get authorized scope
       case Backend:authorize_client_credentials(
           ClientId, RedirectUri, ClientSecret, Scope)
@@ -307,12 +300,14 @@ authorization_code_flow_stage2(Req, State = #state{
         {ok, Identity, Scope2} ->
           % respond with token
           % NB: can also issue refresh token
-          issue_token(Req, State, {Identity, Scope2}, Scope2, Opts);
+          issue_token(Req, State, Identity, Scope2);
         {error, scope} ->
           fail(Req, State#state{data = <<"invalid_scope">>});
         {error, _} ->
           fail(Req, State#state{data = <<"invalid_client">>})
       end;
+    {ok, _} ->
+      fail(Req, State#state{data = <<"invalid_grant">>});
     {error, _} ->
       fail(Req, State#state{data = <<"invalid_grant">>})
   end.
@@ -320,14 +315,16 @@ authorization_code_flow_stage2(Req, State = #state{
 %%
 %% Refresh an access token.
 %%
-refresh_token(Req, State = #state{data = Data, options = Opts}) ->
-  case decode(
-      key(<<"refresh_token">>, Data),
-      key(refresh_secret, Opts),
-      key(refresh_ttl, Opts))
+refresh_token(Req, State = #state{data = Data,
+    backend = Backend, options = Opts}) ->
+  % NB: token is expired after refresh_ttl seconds since issued
+  case Backend:validate_token(key(<<"refresh_token">>, Data),
+      key(refresh_secret, Opts))
   of
-    {ok, {Identity, Scope}} ->
-      issue_token(Req, State, {Identity, Scope}, Scope, Opts);
+    {ok, {refresh_token, Identity, Scope}} ->
+      issue_token(Req, State, Identity, Scope);
+    {ok, _} ->
+      fail(Req, State#state{data = <<"invalid_grant">>});
     {error, _} ->
       fail(Req, State#state{data = <<"invalid_grant">>})
   end.
@@ -336,7 +333,7 @@ refresh_token(Req, State = #state{data = Data, options = Opts}) ->
 %% Request access token for a resource owner.
 %%
 password_credentials_flow(Req, State = #state{
-    data = Data, options = Opts, backend = Backend}) ->
+    data = Data, backend = Backend}) ->
   % @todo ensure scheme is https
   case Backend:authorize_username_password(
       key(<<"username">>, Data),
@@ -344,7 +341,7 @@ password_credentials_flow(Req, State = #state{
       key(<<"scope">>, Data))
   of
     {ok, Identity, Scope} ->
-      issue_token(Req, State, {Identity, Scope}, Scope, Opts);
+      issue_token(Req, State, Identity, Scope);
     {error, scope} ->
       fail(Req, State#state{data = <<"invalid_scope">>});
     {error, _} ->
@@ -354,8 +351,7 @@ password_credentials_flow(Req, State = #state{
 %%
 %% Request access code for a client.
 %%
-client_credentials_flow(Req, State = #state{
-    data = Data, options = Opts, backend = Backend}) ->
+client_credentials_flow(Req, State = #state{data = Data, backend = Backend}) ->
   % @todo ensure scheme is https
   case Backend:authorize_client_credentials(
       key(<<"client_id">>, Data),
@@ -365,7 +361,7 @@ client_credentials_flow(Req, State = #state{
   of
     {ok, Identity, Scope} ->
       % NB: no refresh token should be issued
-      issue_token(Req, State, {Identity, Scope}, Scope, Opts);
+      issue_token(Req, State, Identity, Scope);
     {error, scope} ->
       fail(Req, State#state{data = <<"invalid_scope">>});
     {error, _} ->
@@ -375,40 +371,38 @@ client_credentials_flow(Req, State = #state{
 %%
 %% Respond with access token.
 %%
-issue_token(Req, State, Context, Scope, Opts) ->
+issue_token(Req, State = #state{options = Opts}, Identity, Scope) ->
   {ok, Req2} = cowboy_req:reply(200, [
       {<<"content-type">>, <<"application/json; charset=UTF-8">>},
       {<<"cache-control">>, <<"no-store">>},
       {<<"pragma">>, <<"no-cache">>}
-    ], jsx:encode(token(Context, Scope, Opts)), Req),
+    ], jsx:encode(token(Identity, Scope, Opts)), Req),
   {halt, Req2, State}.
 
-token(Data, Scope, Opts) ->
-  AccessToken = encode(Data, key(token_secret, Opts), key(token_ttl, Opts)),
+token(Identity, Scope, Opts) ->
+  Backend = key(backend, Opts),
+  AccessToken = Backend:register_token({access_token, Identity, Scope},
+      {key(token_secret, Opts), key(token_ttl, Opts)}),
   [
-      {access_token, AccessToken},
-      {token_type, <<"Bearer">>},
-      {expires_in, key(token_ttl, Opts)},
-      {scope, Scope}
-    ].
+    {access_token, AccessToken},
+    {token_type, <<"Bearer">>},
+    {expires_in, key(token_ttl, Opts)},
+    {scope, Scope}
+  ].
 
-token(Data, Scope, Opts, with_refresh) ->
-  AccessToken = encode(Data, key(token_secret, Opts), key(token_ttl, Opts)),
-  RefreshToken = encode(Data, key(refresh_secret, Opts),
-      key(refresh_ttl, Opts)),
-  [
-      {access_token, AccessToken},
-      {token_type, <<"Bearer">>},
-      {expires_in, key(token_ttl, Opts)},
-      {scope, Scope},
-      {refresh_token, RefreshToken}
-    ].
-
-encode(Data, Secret, TTL) ->
-  termit:encode_base64(Data, Secret, TTL).
-
-decode(Data, Secret, TTL) ->
-  termit:decode_base64(Data, Secret, TTL).
+% token(Identity, Scope, Opts, with_refresh) ->
+%   Backend = key(backend, Opts),
+%   AccessToken = Backend:register_token({access_token, Identity, Scope},
+%       {key(token_secret, Opts), key(token_ttl, Opts)}),
+%   RefreshToken = Backend:register_token({refresh_token, Identity, Scope},
+%       {key(refresh_secret, Opts), key(refresh_ttl, Opts)}),
+%   [
+%     {access_token, AccessToken},
+%     {token_type, <<"Bearer">>},
+%     {expires_in, key(token_ttl, Opts)},
+%     {scope, Scope},
+%     {refresh_token, RefreshToken}
+%   ].
 
 %%
 %% -----------------------------------------------------------------------------
