@@ -13,6 +13,7 @@
     terminate/3,
     rest_init/2,
     allowed_methods/2,
+    is_authorized/2,
     content_types_accepted/2,
     content_types_provided/2,
     post_is_create/2
@@ -33,8 +34,7 @@
     options,
     data,
     backend,
-    client_id,
-    client_secret,
+    auth,
     redirect_uri,
     scope,
     opaque,
@@ -52,10 +52,22 @@ terminate(_Reason, _Req, _State) ->
   ok.
 
 rest_init(Req, State) ->
+  % @todo ensure scheme is HTTPS
   {ok, Req, State}.
 
 allowed_methods(Req, State) ->
   {[<<"GET">>, <<"POST">>], Req, State}.
+
+is_authorized(Req, State) ->
+  try cowboy_req:parse_header(<<"authorization">>, Req) of
+    {ok, {<<"basic">>, Credentials}, Req2} ->
+      {true, Req2, State#state{auth = Credentials}};
+    % NB: basic authorization is not mandatory
+    _ ->
+      {true, Req, State}
+  catch _:_ ->
+    {{false, <<"Basic">>}, Req, State}
+  end.
 
 content_types_accepted(Req, State) ->
   {[
@@ -73,15 +85,17 @@ content_types_provided(Req, State) ->
 %% Authorization Request
 %%------------------------------------------------------------------------------
 
-get_resource(Req, State) ->
+get_resource(Req, State = #state{auth = undefined}) ->
   case cowboy_req:qs_val(<<"client_id">>, Req) of
     {undefined, Req2} ->
       fail(Req2, State#state{data = [
           {error, <<"invalid_request">>},
           {error_description, <<"missing client_id">>}]});
     {ClientId, Req2} ->
-      get_redirection_uri(Req2, State#state{client_id = ClientId})
-  end.
+      get_redirection_uri(Req2, State#state{auth = {ClientId, undefined}})
+  end;
+get_resource(Req, State) ->
+  get_redirection_uri(Req, State).
 
 get_redirection_uri(Req, State) ->
   case cowboy_req:qs_val(<<"redirect_uri">>, Req) of
@@ -93,7 +107,7 @@ get_redirection_uri(Req, State) ->
       check_redirection_uri(Req2, State#state{redirect_uri = RedirectUri})
   end.
 
-check_redirection_uri(Req, State = #state{client_id = ClientId,
+check_redirection_uri(Req, State = #state{auth = {ClientId, _},
     redirect_uri = RedirectUri, backend = Backend}) ->
   {Opaque, Req2} = cowboy_req:qs_val(<<"state">>, Req, <<>>),
   case Backend:verify_redirection_uri(ClientId, RedirectUri) of
@@ -125,7 +139,7 @@ check_response_type(Req, State) ->
       fail(Req2, State#state{data = <<"unsupported_response_type">>})
   end.
 
-check_scope(Req, State = #state{client_id = ClientId, backend = Backend}) ->
+check_scope(Req, State = #state{auth = {ClientId, _}, backend = Backend}) ->
   {Scope, Req2} = cowboy_req:qs_val(<<"scope">>, Req),
   case Backend:authorize_client_credentials(ClientId, implicit, Scope) of
     {ok, _, Scope2} ->
@@ -149,7 +163,7 @@ check_scope(Req, State = #state{client_id = ClientId, backend = Backend}) ->
 %%
 
 authorization_decision(Req, State = #state{response_type = <<"code">>,
-    client_id = ClientId, redirect_uri = RedirectUri,
+    auth = {ClientId, _}, redirect_uri = RedirectUri,
     scope = Scope, opaque = Opaque,
     backend = Backend, options = Opts
   }) ->
@@ -172,7 +186,7 @@ authorization_decision(Req, State = #state{response_type = <<"code">>,
     >>, Req, State};
 
 authorization_decision(Req, State = #state{response_type = <<"token">>,
-    client_id = ClientId, redirect_uri = RedirectUri,
+    auth = {ClientId, _}, redirect_uri = RedirectUri,
     scope = Scope, opaque = Opaque, options = Opts
   }) ->
   % NB: client already implicitly authorized at this point
@@ -241,14 +255,14 @@ put_json(Req, State) ->
     {incomplete, _} ->
       {false, Req2, State};
     Data ->
-      request_token(Req2, State#state{data = Data})
+      request_access_token(Req2, State#state{data = Data})
   end.
 
 put_form(Req, State) ->
   {ok, Data, Req2} = cowboy_req:body_qs(Req),
-  request_token(Req2, State#state{data = Data}).
+  request_access_token(Req2, State#state{data = Data}).
 
-request_token(Req, State = #state{data = Data}) ->
+request_access_token(Req, State = #state{data = Data}) ->
   case lists:keyfind(<<"grant_type">>, 1, Data) of
     {_, <<"authorization_code">>} ->
       authorization_code_flow_stage2(Req, State);
@@ -320,12 +334,12 @@ redeem_refresh_token(Req, State = #state{data = Data,
 %%
 %% Request access token for a resource owner.
 %%
-password_credentials_flow(Req, State = #state{
+password_credentials_flow(Req, State = #state{auth = {Username, Password},
     data = Data, backend = Backend}) ->
   % @todo ensure scheme is https
   try Backend:authorize_username_password(
-      key(<<"username">>, Data),
-      key(<<"password">>, Data),
+      Username,
+      Password,
       key(<<"scope">>, Data))
   of
     {ok, Identity, Scope} ->
@@ -336,16 +350,24 @@ password_credentials_flow(Req, State = #state{
       fail(Req, State#state{data = <<"access_denied">>})
   catch _:_ ->
     fail(Req, State#state{data = <<"invalid_request">>})
+  end;
+password_credentials_flow(Req, State = #state{data = Data}) ->
+  try password_credentials_flow(Req, State#state{auth = {
+      key(<<"username">>, Data),
+      key(<<"password">>, Data)}})
+  of
+    Any -> Any
+  catch _:_ ->
+    fail(Req, State#state{data = <<"invalid_request">>})
   end.
 
 %%
 %% Request access code for a client.
 %%
-client_credentials_flow(Req, State = #state{data = Data, backend = Backend}) ->
+client_credentials_flow(Req, State = #state{auth = {ClientId, ClientSecret},
+    data = Data, backend = Backend}) ->
   % @todo ensure scheme is https
-  try Backend:authorize_client_credentials(
-      key(<<"client_id">>, Data),
-      key(<<"client_secret">>, Data),
+  try Backend:authorize_client_credentials(ClientId, ClientSecret,
       key(<<"scope">>, Data))
   of
     {ok, Identity, Scope} ->
@@ -355,6 +377,15 @@ client_credentials_flow(Req, State = #state{data = Data, backend = Backend}) ->
       fail(Req, State#state{data = <<"invalid_scope">>});
     {error, _} ->
       fail(Req, State#state{data = <<"unauthorized_client">>})
+  catch _:_ ->
+    fail(Req, State#state{data = <<"invalid_request">>})
+  end;
+client_credentials_flow(Req, State = #state{data = Data}) ->
+  try client_credentials_flow(Req, State#state{auth = {
+      key(<<"client_id">>, Data),
+      key(<<"client_secret">>, Data)}})
+  of
+    Any -> Any
   catch _:_ ->
     fail(Req, State#state{data = <<"invalid_request">>})
   end.
