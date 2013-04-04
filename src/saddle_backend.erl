@@ -15,33 +15,41 @@
     Password :: binary(),
     Scope :: binary()) ->
   {ok, Identity :: term(), Scope2 :: binary()} |
+  {error, badarg} |
   {error, scope} |
   {error, mismatch}.
 
 %%
 %% Validate client credentials for given scope.
-%% Parameter set to 'any' means do not check this parameter.
-%%   This is used during some authorization flows (eg, implicit grant).
 %%
 -callback authorize_client_credentials(
     ClientId :: binary(),
-    RedirectUri :: binary(),
-    ClientSecret :: binary() | any,
-    Scope :: binary() | any) ->
+    ClientSecret :: binary(),
+    Scope :: binary()) ->
   {ok, Identity :: term(), Scope2 :: binary()} |
-  {error, redirect_uri} |
+  {error, badarg} |
   {error, scope} |
   {error, mismatch}.
+
+%%
+%% Verify correspondance of client and redirection URI.
+%%
+-callback verify_redirection_uri(
+    ClientId :: binary(),
+    RedirectUri :: binary()) ->
+  ok |
+  {error, badarg} |   % redirection URI does match client but smth else wrong
+  {error, mismatch}.  % redirection URI doesn't match client
 
 %%
 %% Register a new client.
 %%
 -callback register_client(
-    Name :: binary(),
+    Identity :: binary(),
     RedirectUri :: binary(),
     Scope :: binary(),
     Options :: term()) ->
-  {ok, ClientId :: binary()} |
+  {ok, ClientId :: binary(), ClientSecret :: binary()} |
   {error, badarg} |
   {error, scope}.
 
@@ -50,8 +58,10 @@
 %%
 -callback validate_client(
     ClientId :: binary(),
-    Secret :: binary()) ->
-  {ok, RedirectUri :: binary(), Scope :: binary()} |
+    RedirectUri :: binary(),
+    Scope :: binary(),
+    Options :: term()) ->
+  {ok, Data :: term()} |
   {error, badarg}.
 
 %%
